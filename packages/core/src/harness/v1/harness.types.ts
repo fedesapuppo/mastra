@@ -3,6 +3,7 @@ import type { MastraModelGateway, MastraModelGatewayInterface } from '../../llm'
 import type { Mastra } from '../../mastra';
 import type { MastraMemory } from '../../memory';
 import type { PublicSchema } from '../../schema';
+import type { MastraCompositeStore } from '../../storage';
 import type { HarnessStorage } from '../../storage/domains/harness';
 import type { DynamicArgument } from '../../types';
 import type { Workspace, WorkspaceConfig } from '../../workspace';
@@ -129,10 +130,11 @@ export interface HarnessConfigCommon<TState, MODES extends HarnessMode[]> {
   defaultModeId?: MODES[number]['id'];
 
   /**
-   * Override for where SessionRecords are persisted. Defaults to the harness
-   * domain on the bound Mastra storage.
+   * Override for where SessionRecords are persisted. Accepts either the
+   * harness storage domain or a storage adapter, such as LibSQLStore, that
+   * exposes a harness store via `getStore('harness')`.
    */
-  storage?: HarnessStorage;
+  storage?: HarnessStorage | MastraCompositeStore;
 
   /**
    * Memory backing thread state for Sessions. Sessions use this to read/write

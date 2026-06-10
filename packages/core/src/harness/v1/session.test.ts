@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Agent } from '../../agent';
 import type { MastraDBMessage } from '../../agent/message-list';
 import type { MastraMemory } from '../../memory';
+import { MastraCompositeStore } from '../../storage';
 import type { StorageCloneThreadInput } from '../../storage';
 import { HarnessStorage } from '../../storage/domains/harness';
 import type { SessionRecord } from '../../storage/domains/harness';
@@ -11,6 +12,11 @@ import { Harness } from './harness';
 
 class RecordingHarnessStorage extends HarnessStorage {
   readonly records = new Map<string, SessionRecord>();
+  initCalls = 0;
+
+  override async init(): Promise<void> {
+    this.initCalls += 1;
+  }
 
   async dangerouslyClearAll(): Promise<void> {
     this.records.clear();
@@ -75,6 +81,7 @@ const createAgent = (overrides: Partial<Agent> = {}) =>
       stream: (async function* () {})(),
     }),
     sendMessage: vi.fn().mockReturnValue({ accepted: true }),
+    sendSignal: vi.fn().mockReturnValue({ accepted: true, runId: 'run-1' }),
     queueMessage: vi.fn().mockReturnValue({ accepted: true, queued: true }),
     ...overrides,
   }) as unknown as Agent;
@@ -173,6 +180,28 @@ describe('Harness.session()', () => {
     await harness.session({ threadId: 'thread-1', resourceId: 'resource-1' });
     const session = await harness.session({ threadId: 'thread-1', resourceId: 'resource-1' });
 
+    expect(storage.records).toHaveLength(1);
+    expect(session.getMode()).toMatchObject({ id: 'build' });
+  });
+
+  it('resolves the harness domain from a top-level storage adapter', async () => {
+    const storage = new RecordingHarnessStorage();
+    const storageAdapter = new MastraCompositeStore({
+      id: 'storage-adapter',
+      domains: { harness: storage },
+    });
+    const harness = new Harness({
+      agents: {},
+      storage: storageAdapter,
+      memory: createMemory(),
+      modes: [{ id: 'build', agentId: 'default', defaultModelId: 'test-build-model' }],
+      defaultModeId: 'build',
+    });
+
+    await harness.session({ threadId: 'thread-1', resourceId: 'resource-1' });
+    const session = await harness.session({ threadId: 'thread-1', resourceId: 'resource-1' });
+
+    expect(storage.initCalls).toBe(1);
     expect(storage.records).toHaveLength(1);
     expect(session.getMode()).toMatchObject({ id: 'build' });
   });
@@ -714,12 +743,12 @@ describe('Harness.ownerId', () => {
     expect(session.ownerId).not.toBe(reader.ownerId);
   });
 
-  it('exposes sendMessage instead of signal', async () => {
+  it('exposes message and signal APIs', async () => {
     const { harness } = createHarness(createMemory());
     const session = await harness.session({ threadId: 'thread-1', resourceId: 'resource-1' });
 
     expect(typeof session.sendMessage).toBe('function');
-    expect((session as unknown as { signal?: unknown }).signal).toBeUndefined();
+    expect(typeof session.sendSignal).toBe('function');
   });
 
   it('subscribes to the session thread through the backing agent', async () => {
@@ -756,6 +785,40 @@ describe('Harness.ownerId', () => {
       }),
     );
     expect(agent.generate).not.toHaveBeenCalled();
+  });
+
+  it('sends signals through the agent thread runtime with session-scoped targets', async () => {
+    const signal = {
+      type: 'user-message' as const,
+      contents: 'hello',
+    };
+    const agent = createAgent({
+      sendSignal: vi.fn().mockReturnValue({ accepted: true, runId: 'run-1', signal }),
+    });
+    const { harness } = createHarness(createMemory(), new RecordingHarnessStorage(), undefined, agent);
+    const session = await harness.session({ threadId: 'thread-1', resourceId: 'resource-1' });
+
+    await expect(
+      session.sendSignal({
+        signal,
+        ifActive: { attributes: { delivery: 'while-active' } },
+        ifIdle: { attributes: { delivery: 'message' } },
+      }),
+    ).resolves.toEqual({ accepted: true, runId: 'run-1', signal });
+
+    expect(agent.sendSignal).toHaveBeenCalledWith(
+      signal,
+      expect.objectContaining({
+        resourceId: 'resource-1',
+        threadId: 'thread-1',
+        ifActive: expect.objectContaining({ attributes: { delivery: 'while-active' } }),
+        ifIdle: expect.objectContaining({
+          behavior: 'wake',
+          attributes: { delivery: 'message' },
+          streamOptions: expect.objectContaining({ activeTools: undefined }),
+        }),
+      }),
+    );
   });
 
   it('queues messages through the agent thread runtime', async () => {
